@@ -5,6 +5,9 @@ Web-based Chat UI for Local LLM using Ollama with RAG support.
 
 import argparse
 import json
+import os
+from datetime import datetime
+from pathlib import Path
 
 from flask import Flask, Response, render_template_string, request
 import requests as http_requests
@@ -36,6 +39,10 @@ model_manager: ModelManager | None = None
 # Current active model
 current_model: str = DEFAULT_MODEL
 
+# Conversations storage directory
+CONVERSATIONS_DIR = Path(__file__).parent / "conversations"
+CONVERSATIONS_DIR.mkdir(exist_ok=True)
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -52,59 +59,80 @@ HTML_TEMPLATE = """
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <header class="header">
-        <h1>Local LLM Chat</h1>
-        <div class="header-actions">
-            <select class="model-select" id="model-select" onchange="switchModel()">
-                <option value="{{ model }}">{{ model }}</option>
-            </select>
-            <button class="btn" id="rag-toggle-btn" onclick="toggleRagPanel()">Documents</button>
-            <button class="btn" onclick="exportChat()">Export</button>
-            <button class="btn" onclick="clearChat()">Clear</button>
+    <!-- Sidebar for conversation history -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h2>Conversations</h2>
+            <button class="btn btn-primary sidebar-new-btn" onclick="newConversation()">New Chat</button>
         </div>
-    </header>
+        <div class="sidebar-search">
+            <input type="text" id="sidebar-search" placeholder="Search conversations..." oninput="filterConversations()">
+        </div>
+        <div class="conversation-list" id="conversation-list">
+            <!-- Conversations will be loaded here -->
+        </div>
+    </aside>
 
-    <div class="rag-panel" id="rag-panel">
-        <div class="rag-input-group">
-            <input 
-                type="text" 
-                class="rag-input" 
-                id="folder-path" 
-                placeholder="Enter folder path containing PDFs..."
-            >
-            <button class="btn btn-primary" id="load-btn" onclick="loadDocuments()">Load PDFs</button>
+    <div class="main-content" id="main-content">
+        <header class="header">
+            <div class="header-left">
+                <button class="btn sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                </button>
+                <h1 class="conversation-title" id="conversation-title" onclick="editConversationName()">New Chat</h1>
+            </div>
+            <div class="header-actions">
+                <select class="model-select" id="model-select" onchange="switchModel()">
+                    <option value="{{ model }}">{{ model }}</option>
+                </select>
+                <button class="btn" id="rag-toggle-btn" onclick="toggleRagPanel()">Documents</button>
+                <button class="btn" onclick="exportChat()">Export</button>
+                <button class="btn" onclick="clearChat()">Clear</button>
+            </div>
+        </header>
+
+        <div class="rag-panel" id="rag-panel">
+            <div class="rag-input-group">
+                <input 
+                    type="text" 
+                    class="rag-input" 
+                    id="folder-path" 
+                    placeholder="Enter folder path containing PDFs..."
+                >
+                <button class="btn btn-primary" id="load-btn" onclick="loadDocuments()">Load PDFs</button>
+            </div>
+            <div class="rag-status" id="rag-status">
+                <span class="rag-status-dot" id="rag-status-dot"></span>
+                <span id="rag-status-text">No documents loaded</span>
+            </div>
+            <label class="rag-toggle">
+                <input type="checkbox" id="rag-enabled" onchange="updateRagMode()">
+                <span>Use RAG</span>
+            </label>
         </div>
-        <div class="rag-status" id="rag-status">
-            <span class="rag-status-dot" id="rag-status-dot"></span>
-            <span id="rag-status-text">No documents loaded</span>
-        </div>
-        <label class="rag-toggle">
-            <input type="checkbox" id="rag-enabled" onchange="updateRagMode()">
-            <span>Use RAG</span>
-        </label>
+
+        <main class="chat-container" id="chat-container">
+            <div class="welcome">
+                <h2>Start a conversation</h2>
+                <p>Messages are processed locally using Ollama.</p>
+                <p style="margin-top: 0.5rem; font-size: 0.85rem;">Click "Documents" to load PDFs for document Q&A.</p>
+            </div>
+        </main>
+
+        <footer class="input-area">
+            <div class="input-wrapper">
+                <textarea 
+                    id="message-input" 
+                    placeholder="Type a message..." 
+                    rows="1"
+                    onkeydown="handleKeyDown(event)"
+                ></textarea>
+                <button id="send-btn" onclick="sendMessage()">
+                    Send
+                </button>
+            </div>
+        </footer>
     </div>
-
-    <main class="chat-container" id="chat-container">
-        <div class="welcome">
-            <h2>Start a conversation</h2>
-            <p>Messages are processed locally using Ollama.</p>
-            <p style="margin-top: 0.5rem; font-size: 0.85rem;">Click "Documents" to load PDFs for document Q&A.</p>
-        </div>
-    </main>
-
-    <footer class="input-area">
-        <div class="input-wrapper">
-            <textarea 
-                id="message-input" 
-                placeholder="Type a message..." 
-                rows="1"
-                onkeydown="handleKeyDown(event)"
-            ></textarea>
-            <button id="send-btn" onclick="sendMessage()">
-                Send
-            </button>
-        </div>
-    </footer>
 
     <!-- Marked.js for markdown rendering -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
@@ -384,6 +412,132 @@ def regenerate():
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
     
     return Response(generate(), mimetype="text/event-stream")
+
+
+# ============== Conversation Persistence Endpoints ==============
+
+@app.route("/conversations", methods=["GET"])
+def list_conversations():
+    """List all saved conversations."""
+    convos = []
+    
+    for file_path in CONVERSATIONS_DIR.glob("*.json"):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                convos.append({
+                    "id": data.get("id", file_path.stem),
+                    "name": data.get("name", "Untitled"),
+                    "created_at": data.get("created_at", ""),
+                    "updated_at": data.get("updated_at", ""),
+                    "model": data.get("model", ""),
+                    "message_count": len(data.get("messages", [])),
+                })
+        except (json.JSONDecodeError, IOError):
+            continue
+    
+    # Sort by updated_at descending (most recent first)
+    convos.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    
+    return {"conversations": convos}
+
+
+@app.route("/conversations/<conversation_id>", methods=["GET"])
+def get_conversation(conversation_id):
+    """Load a specific conversation."""
+    file_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
+    
+    if not file_path.exists():
+        return {"error": "Conversation not found"}, 404
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data
+    except (json.JSONDecodeError, IOError) as e:
+        return {"error": f"Failed to load conversation: {str(e)}"}, 500
+
+
+@app.route("/conversations/<conversation_id>", methods=["POST"])
+def save_conversation(conversation_id):
+    """Save or update a conversation."""
+    data = request.json
+    
+    if not data:
+        return {"error": "No data provided"}, 400
+    
+    file_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
+    
+    # If file exists, preserve created_at
+    created_at = datetime.now().isoformat()
+    if file_path.exists():
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+                created_at = existing.get("created_at", created_at)
+        except (json.JSONDecodeError, IOError):
+            pass
+    
+    # Build conversation data
+    conversation_data = {
+        "id": conversation_id,
+        "name": data.get("name", "Untitled"),
+        "created_at": created_at,
+        "updated_at": datetime.now().isoformat(),
+        "model": data.get("model", current_model),
+        "messages": data.get("messages", []),
+    }
+    
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+        return {"status": "ok", "id": conversation_id}
+    except IOError as e:
+        return {"error": f"Failed to save conversation: {str(e)}"}, 500
+
+
+@app.route("/conversations/<conversation_id>", methods=["DELETE"])
+def delete_conversation(conversation_id):
+    """Delete a conversation."""
+    file_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
+    
+    if not file_path.exists():
+        return {"error": "Conversation not found"}, 404
+    
+    try:
+        file_path.unlink()
+        return {"status": "ok"}
+    except IOError as e:
+        return {"error": f"Failed to delete conversation: {str(e)}"}, 500
+
+
+@app.route("/conversations/<conversation_id>/rename", methods=["POST"])
+def rename_conversation(conversation_id):
+    """Rename a conversation."""
+    data = request.json
+    new_name = data.get("name", "").strip()
+    
+    if not new_name:
+        return {"error": "No name provided"}, 400
+    
+    file_path = CONVERSATIONS_DIR / f"{conversation_id}.json"
+    
+    if not file_path.exists():
+        return {"error": "Conversation not found"}, 404
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            conversation_data = json.load(f)
+        
+        conversation_data["name"] = new_name
+        conversation_data["updated_at"] = datetime.now().isoformat()
+        
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+        
+        return {"status": "ok", "name": new_name}
+    except (json.JSONDecodeError, IOError) as e:
+        return {"error": f"Failed to rename conversation: {str(e)}"}, 500
 
 
 def main():

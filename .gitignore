@@ -28,6 +28,7 @@ desktop.ini
 
 # Project specific
 chroma_db/
+conversations/
 *.log
 
 # Test files (optional - remove if you want to track test docs)
