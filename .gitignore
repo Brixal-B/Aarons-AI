@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+chroma_db/
+*.log
+
+# Test files (optional - remove if you want to track test docs)
+test_docs/
+
+# Large files
+*.pdf
+*.epub
+
+# Cursor
+.cursor/
+
