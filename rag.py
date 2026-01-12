@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
 RAG Engine - Document loading, chunking, embedding, and semantic search.
-Supports PDF, TXT, and Markdown files.
+Supports PDF, TXT, Markdown files, and web URLs.
 """
 
-import os
 import hashlib
+import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 from pypdf import PdfReader
+import requests
 
 
 # Default paths
@@ -158,6 +160,194 @@ class RAGEngine:
         """
         return self.load_documents(folder_path)
 
+    def load_files(self, file_paths: list[Path]) -> dict:
+        """
+        Load specific files (for file upload support).
+        
+        Args:
+            file_paths: List of Path objects to files to load.
+
+        Returns:
+            Dict with loading statistics.
+        """
+        if not file_paths:
+            raise ValueError("No files provided")
+
+        # Create or get collection based on hash of file names
+        files_hash = hashlib.md5("".join(str(f) for f in file_paths).encode()).hexdigest()[:12]
+        self.collection_name = f"uploads_{files_hash}"
+
+        # Delete existing collection if it exists
+        try:
+            self.client.delete_collection(self.collection_name)
+        except (ValueError, Exception):
+            pass
+
+        self.collection = self.client.create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+        stats = {
+            "files_processed": 0,
+            "files_failed": 0,
+            "chunks_created": 0,
+            "errors": [],
+        }
+
+        all_chunks = []
+        all_metadatas = []
+        all_ids = []
+
+        for file_path in file_paths:
+            file_path = Path(file_path)
+            try:
+                text = self._extract_text(file_path)
+                if not text.strip():
+                    stats["errors"].append(f"{file_path.name}: No text extracted")
+                    stats["files_failed"] += 1
+                    continue
+
+                chunks = self._chunk_text(text)
+
+                for i, chunk in enumerate(chunks):
+                    chunk_id = f"{file_path.stem}_{i}"
+                    all_chunks.append(chunk)
+                    all_metadatas.append({
+                        "source": file_path.name,
+                        "file_type": file_path.suffix.lower(),
+                        "chunk_index": i,
+                    })
+                    all_ids.append(chunk_id)
+
+                stats["files_processed"] += 1
+                stats["chunks_created"] += len(chunks)
+
+            except Exception as e:
+                stats["errors"].append(f"{file_path.name}: {str(e)}")
+                stats["files_failed"] += 1
+
+        # Generate embeddings and add to collection
+        if all_chunks:
+            print(f"Generating embeddings for {len(all_chunks)} chunks...")
+            embeddings = self.embedder.encode(all_chunks, show_progress_bar=True)
+
+            self.collection.add(
+                embeddings=embeddings.tolist(),
+                documents=all_chunks,
+                metadatas=all_metadatas,
+                ids=all_ids,
+            )
+
+        return stats
+
+    def load_url(self, url: str) -> dict:
+        """
+        Load content from a web URL.
+        
+        Args:
+            url: The URL to fetch and process.
+
+        Returns:
+            Dict with loading statistics.
+        """
+        # Fetch the URL
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        html = response.text
+        
+        # Extract text from HTML (simple approach)
+        text, title = self._extract_html_text(html)
+        
+        if not text.strip():
+            raise ValueError("No text content found at URL")
+
+        # Create collection based on URL hash
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+        domain = urlparse(url).netloc.replace(".", "_")[:20]
+        self.collection_name = f"url_{domain}_{url_hash}"
+
+        # Delete existing collection if it exists
+        try:
+            self.client.delete_collection(self.collection_name)
+        except (ValueError, Exception):
+            pass
+
+        self.collection = self.client.create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+        # Chunk the text
+        chunks = self._chunk_text(text)
+        
+        all_metadatas = []
+        all_ids = []
+        
+        for i, chunk in enumerate(chunks):
+            all_metadatas.append({
+                "source": url,
+                "title": title,
+                "file_type": "url",
+                "chunk_index": i,
+            })
+            all_ids.append(f"url_{i}")
+
+        # Generate embeddings and add to collection
+        print(f"Generating embeddings for {len(chunks)} chunks from URL...")
+        embeddings = self.embedder.encode(chunks, show_progress_bar=True)
+
+        self.collection.add(
+            embeddings=embeddings.tolist(),
+            documents=chunks,
+            metadatas=all_metadatas,
+            ids=all_ids,
+        )
+
+        return {
+            "chunks_created": len(chunks),
+            "title": title,
+            "url": url,
+        }
+
+    def _extract_html_text(self, html: str) -> tuple[str, str]:
+        """
+        Extract text content from HTML.
+        
+        Args:
+            html: Raw HTML string.
+            
+        Returns:
+            Tuple of (text content, page title).
+        """
+        # Extract title
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        title = title_match.group(1).strip() if title_match else "Untitled"
+        
+        # Remove script and style elements
+        html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
+        html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.IGNORECASE | re.DOTALL)
+        html = re.sub(r"<nav[^>]*>.*?</nav>", "", html, flags=re.IGNORECASE | re.DOTALL)
+        html = re.sub(r"<footer[^>]*>.*?</footer>", "", html, flags=re.IGNORECASE | re.DOTALL)
+        html = re.sub(r"<header[^>]*>.*?</header>", "", html, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Remove HTML tags
+        text = re.sub(r"<[^>]+>", " ", html)
+        
+        # Clean up whitespace
+        text = re.sub(r"\s+", " ", text)
+        text = text.strip()
+        
+        # Decode HTML entities
+        import html as html_module
+        text = html_module.unescape(text)
+        
+        return text, title
+
     def _extract_text(self, file_path: Path) -> str:
         """Extract text from a file based on its extension."""
         ext = file_path.suffix.lower()
@@ -174,10 +364,27 @@ class RAGEngine:
         reader = PdfReader(pdf_path)
         text_parts = []
 
-        for page in reader.pages:
-            text = page.extract_text()
-            if text:
-                text_parts.append(text)
+        for i, page in enumerate(reader.pages):
+            try:
+                # Try standard extraction first
+                text = page.extract_text()
+                if text:
+                    text_parts.append(text)
+            except KeyError as e:
+                # Handle missing bbox or other key errors in complex PDFs
+                print(f"Warning: Could not extract page {i+1} (KeyError: {e}), trying alternative method")
+                try:
+                    # Try extracting with layout mode disabled
+                    text = page.extract_text(extraction_mode="plain")
+                    if text:
+                        text_parts.append(text)
+                except Exception:
+                    # Skip this page if all methods fail
+                    print(f"Warning: Skipping page {i+1} - extraction failed")
+                    continue
+            except Exception as e:
+                print(f"Warning: Error extracting page {i+1}: {e}")
+                continue
 
         return "\n\n".join(text_parts)
 
@@ -200,18 +407,23 @@ class RAGEngine:
         text: str,
         chunk_size: int = 500,
         overlap: int = 50,
+        semantic: bool = True,
     ) -> list[str]:
         """
-        Split text into overlapping chunks.
+        Split text into overlapping chunks, optionally using semantic boundaries.
 
         Args:
             text: The text to chunk.
             chunk_size: Target size of each chunk in words.
             overlap: Number of words to overlap between chunks.
+            semantic: If True, try to split on paragraph/sentence boundaries.
 
         Returns:
             List of text chunks.
         """
+        if semantic:
+            return self._semantic_chunk_text(text, chunk_size, overlap)
+        
         words = text.split()
         chunks = []
 
@@ -228,6 +440,83 @@ class RAGEngine:
             if start >= len(words):
                 break
 
+        return chunks
+
+    def _semantic_chunk_text(
+        self,
+        text: str,
+        target_chunk_size: int = 500,
+        overlap_sentences: int = 2,
+    ) -> list[str]:
+        """
+        Split text using semantic boundaries (paragraphs and sentences).
+        
+        This creates more coherent chunks by:
+        1. First splitting on paragraph boundaries (double newlines)
+        2. Then splitting paragraphs into sentences
+        3. Grouping sentences until reaching target chunk size
+        4. Adding sentence overlap for context continuity
+        
+        Args:
+            text: The text to chunk.
+            target_chunk_size: Target size of each chunk in words.
+            overlap_sentences: Number of sentences to overlap between chunks.
+            
+        Returns:
+            List of text chunks.
+        """
+        # Split into paragraphs first
+        paragraphs = re.split(r'\n\s*\n', text)
+        paragraphs = [p.strip() for p in paragraphs if p.strip()]
+        
+        # Split paragraphs into sentences
+        sentence_pattern = r'(?<=[.!?])\s+(?=[A-Z])'
+        all_sentences = []
+        
+        for para in paragraphs:
+            sentences = re.split(sentence_pattern, para)
+            sentences = [s.strip() for s in sentences if s.strip()]
+            all_sentences.extend(sentences)
+            # Add paragraph marker for context
+            if sentences:
+                all_sentences[-1] = all_sentences[-1] + "\n"
+        
+        if not all_sentences:
+            return [text] if text.strip() else []
+        
+        # Group sentences into chunks
+        chunks = []
+        current_chunk = []
+        current_word_count = 0
+        
+        for i, sentence in enumerate(all_sentences):
+            sentence_words = len(sentence.split())
+            
+            # If adding this sentence exceeds target, save current chunk
+            if current_word_count + sentence_words > target_chunk_size and current_chunk:
+                chunk_text = " ".join(current_chunk).replace(" \n ", "\n\n").strip()
+                chunks.append(chunk_text)
+                
+                # Start new chunk with overlap
+                if overlap_sentences > 0 and len(current_chunk) >= overlap_sentences:
+                    current_chunk = current_chunk[-overlap_sentences:]
+                    current_word_count = sum(len(s.split()) for s in current_chunk)
+                else:
+                    current_chunk = []
+                    current_word_count = 0
+            
+            current_chunk.append(sentence)
+            current_word_count += sentence_words
+        
+        # Add final chunk
+        if current_chunk:
+            chunk_text = " ".join(current_chunk).replace(" \n ", "\n\n").strip()
+            chunks.append(chunk_text)
+        
+        # If we ended up with very few chunks, fall back to simple chunking
+        if len(chunks) == 0:
+            return self._chunk_text(text, target_chunk_size, 50, semantic=False)
+        
         return chunks
 
     def search(self, query: str, k: int = 3) -> list[dict]:

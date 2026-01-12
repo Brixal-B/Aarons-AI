@@ -6,14 +6,17 @@ Web-based Chat UI for Local LLM using Ollama with RAG support.
 import argparse
 import json
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, Response, render_template_string, request
+from werkzeug.utils import secure_filename
 import requests as http_requests
 
 from model_manager import ModelManager
 from rag import RAGEngine, build_rag_prompt
+from web_search import search_web, format_search_context, build_search_prompt
 
 app = Flask(__name__)
 
@@ -92,30 +95,71 @@ HTML_TEMPLATE = """
         </header>
 
         <div class="rag-panel" id="rag-panel">
-            <div class="rag-input-group">
-                <input 
-                    type="text" 
-                    class="rag-input" 
-                    id="folder-path" 
-                    placeholder="Enter folder path containing PDFs..."
-                >
-                <button class="btn btn-primary" id="load-btn" onclick="loadDocuments()">Load PDFs</button>
+            <div class="rag-tabs">
+                <button class="rag-tab active" data-tab="upload" onclick="switchRagTab('upload')">Upload Files</button>
+                <button class="rag-tab" data-tab="folder" onclick="switchRagTab('folder')">Folder Path</button>
+                <button class="rag-tab" data-tab="url" onclick="switchRagTab('url')">URL</button>
             </div>
-            <div class="rag-status" id="rag-status">
-                <span class="rag-status-dot" id="rag-status-dot"></span>
-                <span id="rag-status-text">No documents loaded</span>
+            
+            <div class="rag-tab-content active" id="tab-upload">
+                <div class="drop-zone" id="drop-zone" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+                    <div class="drop-zone-content">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                        <p>Drag & drop files here</p>
+                        <p class="drop-zone-hint">or click to browse</p>
+                        <p class="drop-zone-formats">PDF, TXT, MD files supported</p>
+                    </div>
+                    <input type="file" id="file-input" multiple accept=".pdf,.txt,.md" onchange="handleFileSelect(event)" style="display: none;">
+                </div>
             </div>
-            <label class="rag-toggle">
-                <input type="checkbox" id="rag-enabled" onchange="updateRagMode()">
-                <span>Use RAG</span>
-            </label>
+            
+            <div class="rag-tab-content" id="tab-folder">
+                <div class="rag-input-group">
+                    <input 
+                        type="text" 
+                        class="rag-input" 
+                        id="folder-path" 
+                        placeholder="Enter folder path containing documents..."
+                    >
+                    <button class="btn btn-primary" id="load-btn" onclick="loadDocuments()">Load</button>
+                </div>
+            </div>
+            
+            <div class="rag-tab-content" id="tab-url">
+                <div class="rag-input-group">
+                    <input 
+                        type="text" 
+                        class="rag-input" 
+                        id="url-input" 
+                        placeholder="Enter URL to ingest..."
+                    >
+                    <button class="btn btn-primary" id="load-url-btn" onclick="loadUrl()">Load URL</button>
+                </div>
+            </div>
+            
+            <div class="rag-status-bar">
+                <div class="rag-status" id="rag-status">
+                    <span class="rag-status-dot" id="rag-status-dot"></span>
+                    <span id="rag-status-text">No documents loaded</span>
+                </div>
+                <div class="toggle-group">
+                    <label class="rag-toggle">
+                        <input type="checkbox" id="rag-enabled" onchange="updateRagMode()">
+                        <span>Use RAG</span>
+                    </label>
+                    <label class="rag-toggle">
+                        <input type="checkbox" id="web-search-enabled" onchange="updateWebSearchMode()">
+                        <span>Web Search</span>
+                    </label>
+                </div>
+            </div>
         </div>
 
         <main class="chat-container" id="chat-container">
             <div class="welcome">
                 <h2>Start a conversation</h2>
                 <p>Messages are processed locally using Ollama.</p>
-                <p style="margin-top: 0.5rem; font-size: 0.85rem;">Click "Documents" to load PDFs for document Q&A.</p>
+                <p style="margin-top: 0.5rem; font-size: 0.85rem;">Click "Documents" to load PDFs for document Q&A, or enable "Web Search" for real-time web results.</p>
             </div>
         </main>
 
@@ -182,6 +226,132 @@ def load_documents():
         return {"error": f"Failed to load documents: {str(e)}"}
 
 
+# Temporary upload directory
+UPLOAD_DIR = Path(__file__).parent / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md"}
+
+
+@app.route("/upload_documents", methods=["POST"])
+def upload_documents():
+    """Upload and process documents for RAG."""
+    global rag_engine
+    import sys
+
+    print(f"Upload request received", flush=True)
+    print(f"Request files keys: {list(request.files.keys())}", flush=True)
+    print(f"Request form keys: {list(request.form.keys())}", flush=True)
+    sys.stdout.flush()
+    
+    if "files" not in request.files:
+        print("No 'files' key in request.files", flush=True)
+        return {"error": "No files provided"}
+
+    files = request.files.getlist("files")
+    print(f"Files received: {len(files)}", flush=True)
+    for f in files:
+        print(f"  - filename: '{f.filename}', content_type: {f.content_type}", flush=True)
+    sys.stdout.flush()
+    
+    if not files or all(f.filename == "" for f in files):
+        return {"error": "No files selected"}
+
+    # Save uploaded files to temp directory
+    saved_files = []
+    skipped_files = []
+    for file in files:
+        if file.filename:
+            # Get the original extension before secure_filename
+            original_ext = Path(file.filename).suffix.lower()
+            filename = secure_filename(file.filename)
+            
+            # If secure_filename removed the extension, add it back
+            if not Path(filename).suffix and original_ext:
+                filename = filename + original_ext
+            
+            ext = Path(filename).suffix.lower()
+            
+            if ext not in ALLOWED_EXTENSIONS:
+                skipped_files.append(f"{file.filename} (unsupported type)")
+                continue
+            
+            if not filename:
+                skipped_files.append(f"{file.filename} (invalid filename)")
+                continue
+                
+            file_path = UPLOAD_DIR / filename
+            file.save(file_path)
+            saved_files.append(file_path)
+            print(f"Saved file: {file_path}")
+
+    if not saved_files:
+        error_msg = "No valid files uploaded. Supported: PDF, TXT, MD"
+        if skipped_files:
+            error_msg += f". Skipped: {', '.join(skipped_files)}"
+        return {"error": error_msg}
+
+    try:
+        # Initialize RAG engine if needed
+        if rag_engine is None:
+            rag_engine = RAGEngine()
+
+        print(f"Processing {len(saved_files)} files: {[str(f) for f in saved_files]}")
+        
+        # Process uploaded files
+        stats = rag_engine.load_files(saved_files)
+        
+        print(f"RAG stats: {stats}")
+        
+        return {
+            "files_processed": stats["files_processed"],
+            "chunks_created": stats["chunks_created"],
+            "errors": stats["errors"],
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"error": f"Failed to process documents: {str(e)}"}
+    finally:
+        # Clean up uploaded files
+        for file_path in saved_files:
+            try:
+                file_path.unlink()
+            except Exception:
+                pass
+
+
+@app.route("/load_url", methods=["POST"])
+def load_url():
+    """Load content from a URL for RAG."""
+    global rag_engine
+
+    data = request.json
+    url = data.get("url", "").strip()
+
+    if not url:
+        return {"error": "No URL provided"}
+
+    if not url.startswith(("http://", "https://")):
+        return {"error": "Invalid URL. Must start with http:// or https://"}
+
+    try:
+        # Initialize RAG engine if needed
+        if rag_engine is None:
+            rag_engine = RAGEngine()
+
+        stats = rag_engine.load_url(url)
+        return {
+            "files_processed": 1,
+            "chunks_created": stats["chunks_created"],
+            "url": url,
+            "title": stats.get("title", ""),
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to load URL: {str(e)}"}
+
+
 @app.route("/rag_status")
 def rag_status():
     """Get RAG engine status."""
@@ -192,6 +362,26 @@ def rag_status():
 
     stats = rag_engine.get_stats()
     return stats
+
+
+@app.route("/web_search", methods=["POST"])
+def web_search_endpoint():
+    """Search the web and return results."""
+    data = request.json
+    query = data.get("query", "").strip()
+    
+    if not query:
+        return {"error": "No search query provided"}
+    
+    try:
+        results = search_web(query, num_results=5)
+        return {
+            "results": results,
+            "query": query,
+            "count": len(results),
+        }
+    except Exception as e:
+        return {"error": f"Search failed: {str(e)}"}
 
 
 @app.route("/rag_sources", methods=["GET", "POST"])
@@ -220,6 +410,9 @@ def chat():
     message = data.get("message", "")
     session_id = data.get("session_id", "default")
     use_rag = data.get("use_rag", False)
+    use_web_search = data.get("use_web_search", False)
+
+    print(f"Chat request: use_rag={use_rag}, use_web_search={use_web_search}", flush=True)
 
     if not message:
         return Response(
@@ -228,10 +421,18 @@ def chat():
         )
 
     # Store last request for regeneration
-    last_requests[session_id] = {"message": message, "use_rag": use_rag}
+    last_requests[session_id] = {"message": message, "use_rag": use_rag, "use_web_search": use_web_search}
 
-    # Build messages
-    if use_rag and rag_engine is not None and rag_engine.is_loaded():
+    # Build messages based on mode
+    if use_web_search:
+        # Web search mode: search the web and build prompt with results
+        print(f"Searching web for: {message}", flush=True)
+        search_results = search_web(message, num_results=5)
+        print(f"Got {len(search_results)} search results", flush=True)
+        search_context = format_search_context(search_results)
+        print(f"Search context length: {len(search_context)} chars", flush=True)
+        messages = build_search_prompt(search_context, message)
+    elif use_rag and rag_engine is not None and rag_engine.is_loaded():
         # RAG mode: get context and build prompt
         context, citations = rag_engine.get_context(message, k=3)
         last_rag_sources[session_id] = citations

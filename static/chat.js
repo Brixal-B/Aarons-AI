@@ -9,6 +9,7 @@ const loadBtn = document.getElementById('load-btn');
 const ragStatusDot = document.getElementById('rag-status-dot');
 const ragStatusText = document.getElementById('rag-status-text');
 const ragEnabledCheckbox = document.getElementById('rag-enabled');
+const webSearchCheckbox = document.getElementById('web-search-enabled');
 const modelSelect = document.getElementById('model-select');
 const sidebar = document.getElementById('sidebar');
 const conversationList = document.getElementById('conversation-list');
@@ -19,6 +20,7 @@ let currentModel = modelSelect ? modelSelect.value : 'llama3.2';
 let sessionId = crypto.randomUUID();
 let ragLoaded = false;
 let ragEnabled = false;
+let webSearchEnabled = false;
 let currentConversationId = null;
 let currentConversationName = 'New Chat';
 let conversationMessages = []; // Track messages for saving
@@ -65,6 +67,20 @@ function updateRagMode() {
         ragEnabledCheckbox.checked = false;
         alert('Please load documents first before enabling RAG mode.');
     }
+    // Disable web search if RAG is enabled (mutually exclusive)
+    if (ragEnabled && webSearchEnabled) {
+        webSearchCheckbox.checked = false;
+        webSearchEnabled = false;
+    }
+}
+
+function updateWebSearchMode() {
+    webSearchEnabled = webSearchCheckbox.checked;
+    // Disable RAG if web search is enabled (mutually exclusive)
+    if (webSearchEnabled && ragEnabled) {
+        ragEnabledCheckbox.checked = false;
+        ragEnabled = false;
+    }
 }
 
 async function loadDocuments() {
@@ -110,7 +126,184 @@ async function loadDocuments() {
     }
 
     loadBtn.disabled = false;
-    loadBtn.textContent = 'Load PDFs';
+    loadBtn.textContent = 'Load';
+}
+
+// ============== RAG Tab Switching ==============
+
+function switchRagTab(tabName) {
+    // Update tab buttons
+    document.querySelectorAll('.rag-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.tab === tabName);
+    });
+    
+    // Update tab content
+    document.querySelectorAll('.rag-tab-content').forEach(content => {
+        content.classList.toggle('active', content.id === `tab-${tabName}`);
+    });
+}
+
+// ============== Drag and Drop File Upload ==============
+
+function handleDragOver(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    document.getElementById('drop-zone').classList.add('drag-over');
+}
+
+function handleDragLeave(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    document.getElementById('drop-zone').classList.remove('drag-over');
+}
+
+function handleDrop(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    document.getElementById('drop-zone').classList.remove('drag-over');
+    
+    const files = event.dataTransfer.files;
+    if (files.length > 0) {
+        uploadFiles(files);
+    }
+}
+
+function handleFileSelect(event) {
+    const files = event.target.files;
+    console.log('File select triggered, files:', files);
+    if (files && files.length > 0) {
+        uploadFiles(files);
+    }
+}
+
+// Click handler for drop zone - defined as named function so it can be called directly
+function triggerFileInput(event) {
+    // Prevent triggering if clicking on the file input itself
+    if (event && event.target.id === 'file-input') return;
+    
+    const fileInput = document.getElementById('file-input');
+    if (fileInput) {
+        console.log('Triggering file input click');
+        fileInput.click();
+    }
+}
+
+// Make drop zone clickable
+document.addEventListener('DOMContentLoaded', function() {
+    const dropZone = document.getElementById('drop-zone');
+    
+    if (dropZone) {
+        dropZone.addEventListener('click', triggerFileInput);
+        console.log('Drop zone click handler attached');
+    }
+});
+
+async function uploadFiles(files) {
+    console.log('uploadFiles called with', files.length, 'files');
+    
+    const formData = new FormData();
+    let validFiles = 0;
+    
+    for (const file of files) {
+        console.log('Processing file:', file.name, 'type:', file.type, 'size:', file.size);
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (['pdf', 'txt', 'md'].includes(ext)) {
+            formData.append('files', file);
+            validFiles++;
+            console.log('Added file to form:', file.name);
+        } else {
+            console.log('Skipped file (wrong extension):', file.name);
+        }
+    }
+    
+    if (validFiles === 0) {
+        addSystemMessage('No valid files selected. Supported formats: PDF, TXT, MD', 'error');
+        return;
+    }
+    
+    ragStatusDot.className = 'rag-status-dot loading';
+    ragStatusText.textContent = `Uploading ${validFiles} file(s)...`;
+    
+    console.log('Sending upload request with', validFiles, 'files');
+    
+    try {
+        const response = await fetch('/upload_documents', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+            throw new Error(data.error);
+        }
+        
+        ragLoaded = true;
+        ragStatusDot.className = 'rag-status-dot loaded';
+        ragStatusText.textContent = `${data.files_processed} files, ${data.chunks_created} chunks`;
+        
+        // Auto-enable RAG mode
+        ragEnabledCheckbox.checked = true;
+        ragEnabled = true;
+        
+        addSystemMessage(`Uploaded ${data.files_processed} file(s) (${data.chunks_created} chunks). RAG mode enabled.`, 'success');
+        
+    } catch (error) {
+        ragStatusDot.className = 'rag-status-dot';
+        ragStatusText.textContent = 'Upload failed';
+        addSystemMessage(`Error uploading files: ${error.message}`, 'error');
+    }
+}
+
+// ============== URL Loading ==============
+
+async function loadUrl() {
+    const urlInput = document.getElementById('url-input');
+    const loadUrlBtn = document.getElementById('load-url-btn');
+    const url = urlInput.value.trim();
+    
+    if (!url) {
+        alert('Please enter a URL.');
+        return;
+    }
+    
+    loadUrlBtn.disabled = true;
+    loadUrlBtn.textContent = 'Loading...';
+    ragStatusDot.className = 'rag-status-dot loading';
+    ragStatusText.textContent = 'Fetching URL...';
+    
+    try {
+        const response = await fetch('/load_url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url })
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+            throw new Error(data.error);
+        }
+        
+        ragLoaded = true;
+        ragStatusDot.className = 'rag-status-dot loaded';
+        ragStatusText.textContent = `URL loaded, ${data.chunks_created} chunks`;
+        
+        // Auto-enable RAG mode
+        ragEnabledCheckbox.checked = true;
+        ragEnabled = true;
+        
+        const title = data.title || 'page';
+        addSystemMessage(`Loaded "${title}" (${data.chunks_created} chunks). RAG mode enabled.`, 'success');
+        
+    } catch (error) {
+        ragStatusDot.className = 'rag-status-dot';
+        ragStatusText.textContent = 'Load failed';
+        addSystemMessage(`Error loading URL: ${error.message}`, 'error');
+    }
+    
+    loadUrlBtn.disabled = false;
+    loadUrlBtn.textContent = 'Load URL';
 }
 
 function addSystemMessage(content, type = 'info') {
@@ -197,7 +390,7 @@ function copyCodeBlock(button, index) {
     copyToClipboard(codeText, button);
 }
 
-function addMessage(role, content, usedRag = false) {
+function addMessage(role, content, usedRag = false, usedWebSearch = false) {
     const welcome = chatContainer.querySelector('.welcome');
     if (welcome) welcome.remove();
 
@@ -208,6 +401,9 @@ function addMessage(role, content, usedRag = false) {
     let roleLabel = role === 'user' ? 'You' : 'Assistant';
     if (role === 'assistant' && usedRag) {
         roleLabel += '<span class="context-badge">RAG</span>';
+    }
+    if (role === 'assistant' && usedWebSearch) {
+        roleLabel += '<span class="context-badge web-search">Web</span>';
     }
     
     // For user messages, escape HTML and preserve whitespace
@@ -243,7 +439,7 @@ function copyFullResponse(button) {
     copyToClipboard(rawContent, button);
 }
 
-function addTypingIndicator(usedRag = false) {
+function addTypingIndicator(usedRag = false, usedWebSearch = false) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message assistant';
     messageDiv.id = 'typing-message';
@@ -251,6 +447,9 @@ function addTypingIndicator(usedRag = false) {
     let roleLabel = 'Assistant';
     if (usedRag) {
         roleLabel += '<span class="context-badge">RAG</span>';
+    }
+    if (usedWebSearch) {
+        roleLabel += '<span class="context-badge web-search">Web</span>';
     }
     
     messageDiv.innerHTML = `
@@ -284,13 +483,14 @@ async function sendMessage() {
     messageInput.style.height = 'auto';
 
     const useRag = ragEnabled && ragLoaded;
+    const useWebSearch = webSearchEnabled;
 
     addMessage('user', message);
     
     // Track message for persistence
     conversationMessages.push({ role: 'user', content: message });
     
-    const typingDiv = addTypingIndicator(useRag);
+    const typingDiv = addTypingIndicator(useRag, useWebSearch);
 
     try {
         const response = await fetch('/chat', {
@@ -299,7 +499,8 @@ async function sendMessage() {
             body: JSON.stringify({ 
                 message: message,
                 session_id: sessionId,
-                use_rag: useRag
+                use_rag: useRag,
+                use_web_search: useWebSearch
             })
         });
 

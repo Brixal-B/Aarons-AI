@@ -6,9 +6,15 @@ A chat application that uses Ollama to run local LLMs. Includes both a terminal 
 
 - **Terminal CLI** - Simple command-line chat interface with streaming responses
 - **Web UI** - Browser-based chat with markdown rendering and syntax highlighting
-- **RAG Support** - Load PDF, TXT, and Markdown files to chat with your documents
+- **RAG Support** - Load documents to chat with your content:
+  - Drag-and-drop file upload (PDF, TXT, MD)
+  - Folder path loading
+  - URL ingestion for web pages
+  - Semantic chunking for better retrieval
 - **Model Switching** - Switch between available Ollama models from the web UI
-- **Conversation History** - Maintains context within a session
+- **Conversation Persistence** - Save, load, rename, and delete chat sessions
+- **Export** - Download conversations as Markdown files
+- **Keyboard Shortcuts** - Quick actions for common operations
 - **Local Processing** - All data stays on your machine
 
 ## Prerequisites
@@ -71,12 +77,15 @@ python web_chat.py --preload-rag ./docs     # Preload documents on startup
 
 ### RAG Mode (Chat with Documents)
 
-The RAG engine supports PDF, TXT, and Markdown files.
+The RAG engine supports PDF, TXT, and Markdown files, plus web URLs.
 
 **Via Web UI:**
 1. Click the "Documents" button in the header
-2. Enter the path to a folder containing your documents
-3. Click "Load PDFs" to ingest the documents
+2. Choose your input method:
+   - **Upload Files**: Drag and drop files or click to browse
+   - **Folder Path**: Enter a local folder path
+   - **URL**: Enter a web page URL to ingest
+3. Documents are automatically processed and indexed
 4. Enable "Use RAG" checkbox
 5. Ask questions about your documents
 
@@ -85,7 +94,20 @@ The RAG engine supports PDF, TXT, and Markdown files.
 python rag.py ./path/to/docs "What is the main topic?"
 ```
 
-The system uses sentence-transformers (`all-MiniLM-L6-v2`) for embeddings and ChromaDB for vector storage. Documents are chunked with overlapping segments for better context retrieval.
+The system uses sentence-transformers (`all-MiniLM-L6-v2`) for embeddings and ChromaDB for vector storage. Documents are split using semantic chunking that respects paragraph and sentence boundaries for better context retrieval.
+
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Enter` | Send message |
+| `Shift+Enter` | New line in message |
+| `Ctrl+Shift+E` | Export chat |
+| `Ctrl+Shift+K` | Clear chat |
+| `Ctrl+Shift+D` | Toggle documents panel |
+| `Ctrl+Shift+N` | New conversation |
+| `Ctrl+/` | Show shortcuts help |
+| `Escape` | Focus input field |
 
 ## Project Structure
 
@@ -111,12 +133,18 @@ Aarons-AI/
 | `/` | GET | Serve the chat UI |
 | `/chat` | POST | Send a message (streaming response) |
 | `/clear` | POST | Clear conversation history |
-| `/load_documents` | POST | Load documents for RAG |
+| `/load_documents` | POST | Load documents from folder for RAG |
+| `/upload_documents` | POST | Upload files for RAG (multipart) |
+| `/load_url` | POST | Load URL content for RAG |
 | `/rag_status` | GET | Get RAG engine status |
 | `/rag_sources` | GET/POST | Get sources from last RAG query |
 | `/models` | GET | List available Ollama models |
 | `/switch_model` | POST | Switch to a different model |
 | `/regenerate` | POST | Regenerate the last response |
+| `/conversations` | GET | List saved conversations |
+| `/conversations/<id>` | GET/POST | Load or save a conversation |
+| `/conversations/<id>/rename` | POST | Rename a conversation |
+| `/conversations/<id>/delete` | POST | Delete a conversation |
 
 ## Models
 
