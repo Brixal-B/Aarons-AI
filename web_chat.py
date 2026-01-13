@@ -17,6 +17,7 @@ import requests as http_requests
 from model_manager import ModelManager
 from rag import RAGEngine, build_rag_prompt
 from web_search import search_web, format_search_context, build_search_prompt
+from memories import MemoryStore, extract_memories_from_conversation, build_prompt_with_memories
 
 app = Flask(__name__)
 
@@ -41,6 +42,9 @@ model_manager: ModelManager | None = None
 
 # Current active model
 current_model: str = DEFAULT_MODEL
+
+# Global memory store
+memory_store: MemoryStore | None = None
 
 # Conversations storage directory
 CONVERSATIONS_DIR = Path(__file__).parent / "conversations"
@@ -89,6 +93,7 @@ HTML_TEMPLATE = """
                     <option value="{{ model }}">{{ model }}</option>
                 </select>
                 <button class="btn" id="rag-toggle-btn" onclick="toggleRagPanel()">Documents</button>
+                <button class="btn" id="memories-toggle-btn" onclick="toggleMemoriesPanel()">Memories</button>
                 <button class="btn" onclick="exportChat()">Export</button>
                 <button class="btn" onclick="clearChat()">Clear</button>
             </div>
@@ -152,6 +157,34 @@ HTML_TEMPLATE = """
                         <span>Web Search</span>
                     </label>
                 </div>
+            </div>
+        </div>
+
+        <!-- Memories Panel -->
+        <div class="memories-panel collapsed" id="memories-panel">
+            <div class="memories-header">
+                <h3>Memories</h3>
+                <div class="memories-header-actions">
+                    <label class="rag-toggle">
+                        <input type="checkbox" id="memories-enabled" checked onchange="updateMemoriesMode()">
+                        <span>Active</span>
+                    </label>
+                    <label class="rag-toggle">
+                        <input type="checkbox" id="auto-extract-enabled" onchange="updateAutoExtractMode()">
+                        <span>Auto-learn</span>
+                    </label>
+                </div>
+            </div>
+            <div class="memories-add">
+                <input type="text" id="memory-input" placeholder="Add a memory (e.g., 'My name is Aaron')">
+                <button class="btn btn-primary" onclick="addMemory()">Add</button>
+            </div>
+            <div class="memories-list" id="memories-list">
+                <!-- Memories will be loaded here -->
+            </div>
+            <div class="memories-footer">
+                <button class="btn btn-small" onclick="extractMemories()">Extract from Chat</button>
+                <button class="btn btn-small btn-danger" onclick="clearAllMemories()">Clear All</button>
             </div>
         </div>
 
@@ -404,15 +437,17 @@ def rag_sources():
 @app.route("/chat", methods=["POST"])
 def chat():
     """Handle chat messages with streaming response."""
-    global rag_engine, current_model
+    global rag_engine, current_model, memory_store
 
     data = request.json
     message = data.get("message", "")
     session_id = data.get("session_id", "default")
     use_rag = data.get("use_rag", False)
     use_web_search = data.get("use_web_search", False)
+    use_memories = data.get("use_memories", True)  # Enabled by default
+    auto_extract_memories = data.get("auto_extract_memories", False)
 
-    print(f"Chat request: use_rag={use_rag}, use_web_search={use_web_search}", flush=True)
+    print(f"Chat request: use_rag={use_rag}, use_web_search={use_web_search}, use_memories={use_memories}, auto_extract={auto_extract_memories}", flush=True)
 
     if not message:
         return Response(
@@ -423,6 +458,18 @@ def chat():
     # Store last request for regeneration
     last_requests[session_id] = {"message": message, "use_rag": use_rag, "use_web_search": use_web_search}
 
+    # Get memory context if enabled
+    memories_context = ""
+    if use_memories and memory_store is not None:
+        memories_context = memory_store.get_context_string()
+
+    # Initialize conversation history for this session if needed
+    if session_id not in conversations:
+        conversations[session_id] = []
+
+    # Get conversation history for multi-turn context
+    conversation_history = conversations[session_id].copy()
+
     # Build messages based on mode
     if use_web_search:
         # Web search mode: search the web and build prompt with results
@@ -431,19 +478,29 @@ def chat():
         print(f"Got {len(search_results)} search results", flush=True)
         search_context = format_search_context(search_results)
         print(f"Search context length: {len(search_context)} chars", flush=True)
-        messages = build_search_prompt(search_context, message)
+        messages = build_search_prompt(search_context, message, memories_context, conversation_history)
+        # Track the user message in history
+        conversations[session_id].append({"role": "user", "content": message})
     elif use_rag and rag_engine is not None and rag_engine.is_loaded():
         # RAG mode: get context and build prompt
         context, citations = rag_engine.get_context(message, k=3)
         last_rag_sources[session_id] = citations
-        messages = build_rag_prompt(context, message)
+        messages = build_rag_prompt(context, message, memories_context, conversation_history)
+        # Track the user message in history
+        conversations[session_id].append({"role": "user", "content": message})
     else:
         # Regular chat mode with conversation history
-        if session_id not in conversations:
-            conversations[session_id] = []
-
         conversations[session_id].append({"role": "user", "content": message})
-        messages = conversations[session_id]
+        
+        # Build messages with memory context
+        if memories_context:
+            messages = build_prompt_with_memories(
+                memories_context,
+                message,
+                conversations[session_id][:-1]  # Previous messages (excluding current)
+            )
+        else:
+            messages = conversations[session_id]
 
     def generate():
         try:
@@ -471,11 +528,36 @@ def chat():
                     if chunk.get("done", False):
                         break
 
-            # Store assistant response in history (only for non-RAG mode)
-            if not use_rag and session_id in conversations:
+            # Store assistant response in history (for all modes now)
+            if session_id in conversations:
                 conversations[session_id].append(
                     {"role": "assistant", "content": full_response}
                 )
+            
+            # Auto-extract memories if enabled (run periodically, not every message)
+            if auto_extract_memories and memory_store is not None:
+                # Only extract every 4 messages to avoid overhead
+                msg_count = len(conversations.get(session_id, []))
+                if msg_count > 0 and msg_count % 4 == 0:
+                    try:
+                        # Get last few messages for extraction
+                        recent_msgs = conversations[session_id][-6:]
+                        extracted = extract_memories_from_conversation(
+                            recent_msgs,
+                            ollama_url=OLLAMA_URL,
+                            model=current_model,
+                        )
+                        for mem in extracted:
+                            if mem.get("content"):
+                                memory_store.add(
+                                    mem.get("title", ""),
+                                    mem["content"],
+                                    mem.get("category", "general"),
+                                )
+                        if extracted:
+                            print(f"Auto-extracted {len(extracted)} memories", flush=True)
+                    except Exception as e:
+                        print(f"Auto-extract error: {e}", flush=True)
 
         except http_requests.exceptions.ConnectionError:
             yield f"data: {json.dumps({'error': 'Could not connect to Ollama. Make sure it is running.'})}\n\n"
@@ -741,8 +823,131 @@ def rename_conversation(conversation_id):
         return {"error": f"Failed to rename conversation: {str(e)}"}, 500
 
 
+# ============== Memory Endpoints ==============
+
+@app.route("/memories", methods=["GET"])
+def list_memories():
+    """List all stored memories."""
+    global memory_store
+    
+    if memory_store is None:
+        memory_store = MemoryStore()
+    
+    memories = memory_store.get_all()
+    return {"memories": memories, "count": len(memories)}
+
+
+@app.route("/memories", methods=["POST"])
+def add_memory():
+    """Add a new memory manually."""
+    global memory_store
+    
+    if memory_store is None:
+        memory_store = MemoryStore()
+    
+    data = request.json
+    title = data.get("title", "").strip()
+    content = data.get("content", "").strip()
+    category = data.get("category", "general")
+    
+    if not content:
+        return {"error": "Memory content is required"}, 400
+    
+    if not title:
+        # Auto-generate title from content
+        title = content[:30] + ("..." if len(content) > 30 else "")
+    
+    memory_id = memory_store.add(title, content, category)
+    return {"status": "ok", "id": memory_id}
+
+
+@app.route("/memories/<memory_id>", methods=["PUT"])
+def update_memory(memory_id):
+    """Update an existing memory."""
+    global memory_store
+    
+    if memory_store is None:
+        memory_store = MemoryStore()
+    
+    data = request.json
+    success = memory_store.update(
+        memory_id,
+        title=data.get("title"),
+        content=data.get("content"),
+        category=data.get("category"),
+    )
+    
+    if not success:
+        return {"error": "Memory not found"}, 404
+    
+    return {"status": "ok"}
+
+
+@app.route("/memories/<memory_id>", methods=["DELETE"])
+def delete_memory(memory_id):
+    """Delete a memory."""
+    global memory_store
+    
+    if memory_store is None:
+        memory_store = MemoryStore()
+    
+    success = memory_store.delete(memory_id)
+    
+    if not success:
+        return {"error": "Memory not found"}, 404
+    
+    return {"status": "ok"}
+
+
+@app.route("/memories/clear", methods=["POST"])
+def clear_memories():
+    """Clear all memories."""
+    global memory_store
+    
+    if memory_store is None:
+        memory_store = MemoryStore()
+    
+    memory_store.clear()
+    return {"status": "ok"}
+
+
+@app.route("/memories/extract", methods=["POST"])
+def extract_memories():
+    """Extract memories from a conversation using the LLM."""
+    global memory_store, current_model
+    
+    if memory_store is None:
+        memory_store = MemoryStore()
+    
+    data = request.json
+    messages = data.get("messages", [])
+    
+    if not messages:
+        return {"error": "No messages provided"}, 400
+    
+    # Use the LLM to extract memories
+    extracted = extract_memories_from_conversation(
+        messages,
+        ollama_url=OLLAMA_URL,
+        model=current_model,
+    )
+    
+    # Add extracted memories to store
+    added = []
+    for memory in extracted:
+        if memory.get("content"):
+            memory_id = memory_store.add(
+                memory.get("title", ""),
+                memory["content"],
+                memory.get("category", "general"),
+            )
+            added.append({"id": memory_id, **memory})
+    
+    return {"extracted": added, "count": len(added)}
+
+
 def main():
-    global rag_engine, model_manager, current_model
+    global rag_engine, model_manager, current_model, memory_store
 
     parser = argparse.ArgumentParser(description="Web-based Chat UI for Local LLM with RAG")
     parser.add_argument(
@@ -781,6 +986,10 @@ def main():
 
     # Initialize model manager
     model_manager = ModelManager(OLLAMA_URL)
+
+    # Initialize memory store
+    memory_store = MemoryStore()
+    print(f"Memory store loaded: {len(memory_store.get_all())} memories")
 
     # Preload RAG if specified
     if args.preload_rag:

@@ -223,24 +223,43 @@ Instructions:
 - Be concise but thorough"""
 
 
-def build_search_prompt(search_context: str, question: str) -> list[dict]:
+def build_search_prompt(
+    search_context: str, 
+    question: str, 
+    memories_context: str = "",
+    conversation_history: list[dict] | None = None,
+) -> list[dict]:
     """
     Build messages list for search-augmented chat.
     
     Args:
         search_context: Formatted search results.
         question: User's question.
+        memories_context: Optional user memory context.
+        conversation_history: Optional previous messages for multi-turn search.
         
     Returns:
         List of message dicts for Ollama API.
     """
-    return [
-        {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"{search_context}\n---\n\nQuestion: {question}",
-        },
-    ]
+    system_content = SEARCH_SYSTEM_PROMPT
+    if memories_context:
+        system_content += f"\n\n{memories_context}"
+    
+    messages = [{"role": "system", "content": system_content}]
+    
+    # Add conversation history for multi-turn context
+    if conversation_history:
+        # Include recent history (limit to last 6 messages to avoid context overflow)
+        recent_history = conversation_history[-6:]
+        messages.extend(recent_history)
+    
+    # Add current question with search context
+    messages.append({
+        "role": "user",
+        "content": f"{search_context}\n---\n\nQuestion: {question}",
+    })
+    
+    return messages
 
 
 if __name__ == "__main__":

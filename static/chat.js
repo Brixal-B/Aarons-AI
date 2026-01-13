@@ -21,6 +21,9 @@ let sessionId = crypto.randomUUID();
 let ragLoaded = false;
 let ragEnabled = false;
 let webSearchEnabled = false;
+let memoriesEnabled = true;  // Enabled by default
+let autoExtractEnabled = false;  // Auto-learn disabled by default
+let allMemories = [];  // Cache of memories
 let currentConversationId = null;
 let currentConversationName = 'New Chat';
 let conversationMessages = []; // Track messages for saving
@@ -477,6 +480,13 @@ async function sendMessage() {
     const message = messageInput.value.trim();
     if (!message || isGenerating) return;
 
+    // Handle /remember command
+    if (handleRememberCommand(message)) {
+        messageInput.value = '';
+        messageInput.style.height = 'auto';
+        return;
+    }
+
     isGenerating = true;
     sendBtn.disabled = true;
     messageInput.value = '';
@@ -484,6 +494,7 @@ async function sendMessage() {
 
     const useRag = ragEnabled && ragLoaded;
     const useWebSearch = webSearchEnabled;
+    const useMemories = memoriesEnabled;
 
     addMessage('user', message);
     
@@ -500,7 +511,9 @@ async function sendMessage() {
                 message: message,
                 session_id: sessionId,
                 use_rag: useRag,
-                use_web_search: useWebSearch
+                use_web_search: useWebSearch,
+                use_memories: useMemories,
+                auto_extract_memories: autoExtractEnabled
             })
         });
 
@@ -1032,11 +1045,220 @@ function editConversationName() {
     input.select();
 }
 
+// ============== Memory Management ==============
+
+function toggleMemoriesPanel() {
+    const panel = document.getElementById('memories-panel');
+    panel.classList.toggle('collapsed');
+    
+    // Load memories when panel opens
+    if (!panel.classList.contains('collapsed')) {
+        loadMemories();
+    }
+}
+
+function updateMemoriesMode() {
+    const checkbox = document.getElementById('memories-enabled');
+    memoriesEnabled = checkbox ? checkbox.checked : true;
+}
+
+function updateAutoExtractMode() {
+    const checkbox = document.getElementById('auto-extract-enabled');
+    autoExtractEnabled = checkbox ? checkbox.checked : false;
+}
+
+async function loadMemories() {
+    try {
+        const response = await fetch('/memories');
+        const data = await response.json();
+        
+        allMemories = data.memories || [];
+        renderMemoriesList();
+    } catch (e) {
+        console.error('Failed to load memories:', e);
+    }
+}
+
+function renderMemoriesList() {
+    const list = document.getElementById('memories-list');
+    
+    if (allMemories.length === 0) {
+        list.innerHTML = '<div class="memories-empty">No memories stored yet. Add facts about yourself or your projects.</div>';
+        return;
+    }
+    
+    // Group by category
+    const grouped = {};
+    allMemories.forEach(memory => {
+        const cat = memory.category || 'general';
+        if (!grouped[cat]) grouped[cat] = [];
+        grouped[cat].push(memory);
+    });
+    
+    let html = '';
+    for (const [category, memories] of Object.entries(grouped)) {
+        html += `<div class="memory-category">
+            <div class="memory-category-title">${category.charAt(0).toUpperCase() + category.slice(1)}</div>`;
+        
+        memories.forEach(memory => {
+            html += `
+                <div class="memory-item" data-id="${memory.id}">
+                    <div class="memory-content">
+                        <div class="memory-title">${escapeHtml(memory.title)}</div>
+                        <div class="memory-text">${escapeHtml(memory.content)}</div>
+                    </div>
+                    <button class="memory-delete-btn" onclick="deleteMemory('${memory.id}')" title="Delete">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                </div>
+            `;
+        });
+        
+        html += '</div>';
+    }
+    
+    list.innerHTML = html;
+}
+
+async function addMemory() {
+    const input = document.getElementById('memory-input');
+    const content = input.value.trim();
+    
+    if (!content) {
+        alert('Please enter a memory.');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/memories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: content, category: 'general' })
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+            alert('Error adding memory: ' + data.error);
+            return;
+        }
+        
+        input.value = '';
+        loadMemories();
+        addSystemMessage('Memory added.', 'success');
+        
+    } catch (e) {
+        alert('Error adding memory: ' + e.message);
+    }
+}
+
+async function deleteMemory(memoryId) {
+    try {
+        const response = await fetch(`/memories/${memoryId}`, {
+            method: 'DELETE'
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+            alert('Error deleting memory: ' + data.error);
+            return;
+        }
+        
+        loadMemories();
+        
+    } catch (e) {
+        alert('Error deleting memory: ' + e.message);
+    }
+}
+
+async function extractMemories() {
+    if (conversationMessages.length === 0) {
+        alert('No conversation to extract memories from.');
+        return;
+    }
+    
+    addSystemMessage('Extracting memories from conversation...', 'info');
+    
+    try {
+        const response = await fetch('/memories/extract', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: conversationMessages })
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+            addSystemMessage('Error extracting memories: ' + data.error, 'error');
+            return;
+        }
+        
+        if (data.count === 0) {
+            addSystemMessage('No new memories found in the conversation.', 'info');
+        } else {
+            addSystemMessage(`Extracted ${data.count} memory(ies).`, 'success');
+            loadMemories();
+        }
+        
+    } catch (e) {
+        addSystemMessage('Error extracting memories: ' + e.message, 'error');
+    }
+}
+
+async function clearAllMemories() {
+    if (!confirm('Clear all memories? This cannot be undone.')) return;
+    
+    try {
+        const response = await fetch('/memories/clear', {
+            method: 'POST'
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+            alert('Error clearing memories: ' + data.error);
+            return;
+        }
+        
+        loadMemories();
+        addSystemMessage('All memories cleared.', 'info');
+        
+    } catch (e) {
+        alert('Error clearing memories: ' + e.message);
+    }
+}
+
+// Handle /remember command in chat
+function handleRememberCommand(message) {
+    const match = message.match(/^\/remember\s+(.+)$/i);
+    if (match) {
+        const content = match[1].trim();
+        fetch('/memories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: content, category: 'general' })
+        }).then(response => response.json()).then(data => {
+            if (data.error) {
+                addSystemMessage('Error: ' + data.error, 'error');
+            } else {
+                addSystemMessage('Memory saved: ' + content, 'success');
+                loadMemories();
+            }
+        }).catch(e => {
+            addSystemMessage('Error saving memory: ' + e.message, 'error');
+        });
+        return true;
+    }
+    return false;
+}
+
 // Initialize
 messageInput.focus();
 checkRagStatus();
 loadModels();
 loadConversations();
+loadMemories();
 
 // Set initial conversation ID
 currentConversationId = sessionId;

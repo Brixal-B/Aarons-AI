@@ -1177,3 +1177,160 @@ body {
     }
 }
 
+/* ============== Memories Panel ============== */
+
+.memories-panel {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 1rem;
+    max-height: 350px;
+    overflow: hidden;
+    transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.3s ease;
+}
+
+.memories-panel.collapsed {
+    max-height: 0;
+    padding: 0 1rem;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.memories-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.memories-header h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0;
+}
+
+.memories-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.memories-add {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.memories-add input {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    color: var(--text);
+    font-size: 0.85rem;
+}
+
+.memories-add input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.memories-list {
+    max-height: 180px;
+    overflow-y: auto;
+    margin-bottom: 0.75rem;
+}
+
+.memories-empty {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 1rem;
+}
+
+.memory-category {
+    margin-bottom: 0.75rem;
+}
+
+.memory-category-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.4rem;
+    padding-left: 0.25rem;
+}
+
+.memory-item {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 0.5rem 0.6rem;
+    background: var(--background);
+    border-radius: 6px;
+    margin-bottom: 0.35rem;
+    border: 1px solid var(--border);
+}
+
+.memory-item:hover {
+    border-color: var(--accent);
+}
+
+.memory-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.memory-title {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 0.15rem;
+}
+
+.memory-text {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.memory-delete-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0.25rem;
+    border-radius: 4px;
+    opacity: 0.5;
+    transition: opacity 0.2s, color 0.2s;
+    flex-shrink: 0;
+}
+
+.memory-delete-btn:hover {
+    opacity: 1;
+    color: #ef4444;
+}
+
+.memories-footer {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+}
+
+.btn-small {
+    font-size: 0.75rem;
+    padding: 0.35rem 0.6rem;
+}
+
+.btn-danger {
+    color: #ef4444;
+}
+
+.btn-danger:hover {
+    background: rgba(239, 68, 68, 0.1);
+}
+
